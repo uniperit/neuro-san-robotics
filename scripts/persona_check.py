@@ -7,6 +7,10 @@ conversation + recently used puns), so no robot or server is needed.
     set -a; . ./.env; set +a
     ROBOT_NAME=Jasper venv/bin/python scripts/persona_check.py
 
+On the robot (Azure, same model as the running agent):
+
+    source setmyenv.sh && python scripts/persona_check.py
+
 Reports pun rate, self-descriptions, replies over three sentences, and replies
 the TTS cleaner had to change. Exits 1 if any check fails.
 """
@@ -17,6 +21,7 @@ import re
 import sys
 from pathlib import Path
 
+from openai import AzureOpenAI
 from openai import OpenAI
 from pyhocon import ConfigFactory
 
@@ -58,8 +63,11 @@ def load_agent():
 
 
 def ask(client, model, instructions, tool, event_text):
+    # Same reasoning effort as the agent (setmyenv sets "none" for GPT-6).
+    effort = os.environ.get("AGENT_LLM_REASONING_EFFORT")
     response = client.chat.completions.create(
         model=model,
+        **({"reasoning_effort": effort} if effort else {}),
         messages=[{"role": "system", "content": instructions}, {"role": "user", "content": event_text}],
         tools=[tool],
     )
@@ -71,7 +79,11 @@ def ask(client, model, instructions, tool, event_text):
 
 def main():
     instructions, tool, model = load_agent()
-    client = OpenAI()
+    # Azure (as on the robot) reads its key, endpoint and API version from the environment.
+    azure = bool(os.environ.get("AZURE_OPENAI_ENDPOINT"))
+    client = AzureOpenAI() if azure else OpenAI()
+    if azure:
+        model = os.environ["AZURE_OPENAI_DEPLOYMENT_NAME"]
     context = TurnContext()
     rows = []
     for number, text in enumerate(TURNS):
