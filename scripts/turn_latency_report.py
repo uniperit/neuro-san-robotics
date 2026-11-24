@@ -66,6 +66,8 @@ def steps(turn):
             ("  setup + 1st sentence", turn["audio_ms"] - turn["speak_start_ms"]),
         ]
     rows.append(("total", turn["audio_ms"]))
+    if "ack_ms" in turn:  # only turns slow enough to need one (#9)
+        rows.append(("time to acknowledgement", turn["ack_ms"]))
     return rows
 
 

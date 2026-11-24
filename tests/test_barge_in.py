@@ -438,5 +438,64 @@ class BargeInSocketFlowTests(SpeechStateTestCase):
         self.assertEqual(payload["sly_data"]["speech_epoch"], interface_flask._speech_epoch)
 
 
+class AcknowledgementTests(SpeechStateTestCase):
+    """The filler before a slow answer (#9): only when slow, only once, never stale."""
+
+    def setUp(self):
+        super().setUp()
+        interface_flask._speech_active = False
+
+    def arm(self):
+        """Mimic a voice turn whose transcript arrived just now."""
+        return ("t1", interface_flask._speech_epoch, time.monotonic())
+
+    def test_a_slow_answer_gets_exactly_one_acknowledgement(self):
+        interface_flask._acknowledge_if_slow(*self.arm())
+
+        job = self.speech_queue.get_nowait()
+        self.assertTrue(job["ack"])
+        self.assertIn(job["text"], interface_flask.ACKNOWLEDGMENT_PHRASES)
+        self.assertTrue(self.speech_queue.empty())
+
+    def test_an_answer_within_the_threshold_suppresses_it(self):
+        armed = self.arm()
+        interface_flask.enqueue_speech("The kitchen is down the hall.", turn_id="t1")
+        self.speech_queue.get_nowait()
+
+        interface_flask._acknowledge_if_slow(*armed)
+
+        self.assertTrue(self.speech_queue.empty())
+
+    def test_a_barge_in_before_the_threshold_suppresses_it(self):
+        armed = self.arm()
+        with patch.object(interface_flask, "tts_stop_speaking", return_value=False):
+            interface_flask.cancel_speech(reason="test")
+
+        interface_flask._acknowledge_if_slow(*armed)
+
+        self.assertTrue(self.speech_queue.empty())
+
+    def test_the_robot_already_talking_suppresses_it(self):
+        armed = self.arm()
+        self.set_speaking("something it was already saying")
+
+        interface_flask._acknowledge_if_slow(*armed)
+
+        self.assertTrue(self.speech_queue.empty())
+
+    def test_ambient_speech_only_acknowledges_when_the_robot_is_named(self):
+        cases = {
+            "did you see the match yesterday": False,
+            f"{interface_flask.robot_name()} where is the kitchen": True,
+        }
+        for transcript, expected in cases.items():
+            with self.subTest(transcript=transcript), \
+                    patch.object(interface_flask, "schedule_acknowledgement") as schedule, \
+                    patch.object(interface_flask, "queue_agent_event"), \
+                    patch.object(interface_flask, "socketio"):
+                interface_flask.handle_ambient_transcript({"data": transcript})
+                self.assertEqual(schedule.called, expected)
+
+
 if __name__ == "__main__":
     unittest.main()

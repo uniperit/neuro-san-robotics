@@ -20,7 +20,8 @@ import uuid
 logger = logging.getLogger(__name__)
 
 # speak_start: the speech worker took the turn's reply off the queue (#16).
-STEPS = ("transcript", "dispatched", "ui_output", "speak_start", "audio")
+# ack: the acknowledgement became audible (#9); audio stays the answer's first word.
+STEPS = ("transcript", "dispatched", "ack", "ui_output", "speak_start", "audio")
 
 _LOCK = threading.Lock()
 _OPEN: dict[str, dict] = {}

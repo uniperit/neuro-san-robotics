@@ -1,10 +1,10 @@
 import atexit
 
 import difflib
+import itertools
 import logging
 import os
 import queue
-import random
 import re
 import signal
 import sys
@@ -67,6 +67,7 @@ try:
     from coded_tools.unigo2.tts_go2 import SpeechInterrupted
     from coded_tools.unigo2.tts_go2 import duck_playback as tts_duck_playback
     from coded_tools.unigo2.tts_go2 import say as tts_say
+    from coded_tools.unigo2.tts_go2 import say_cached as tts_say_cached
     from coded_tools.unigo2.tts_go2 import stop_speaking as tts_stop_speaking
     from coded_tools.unigo2.tts_go2 import set_audio_started_listener
     from coded_tools.unigo2.tts_go2 import warm_piper_in_background
@@ -75,6 +76,7 @@ except ImportError:
     logging.warning("TTS module not available - speech will be text-only")
     TTS_AVAILABLE = False
     tts_say = None
+    tts_say_cached = None
     tts_stop_speaking = None
     tts_duck_playback = None
     warm_piper_in_background = None
@@ -83,28 +85,18 @@ except ImportError:
     class SpeechInterrupted(RuntimeError):
         """Stand-in so the speech worker can catch barge-ins without TTS installed."""
 
-# An explicit acknowledgement costs a full utterance of latency and queue
-# pressure. With barge-in the robot is already interruptible, so this is off
-# unless someone deliberately turns it back on.
+# A short content-free utterance ("Mhm.") that fills the wait for a slow answer
+# on a voice turn (#9). It is not part of the answer.
 ACKNOWLEDGE_USER_INPUT = os.environ.get(
     "CONSCIOUS_ACKNOWLEDGE_USER_INPUT",
-    "0",
+    "1",
 ).strip().lower() in {"1", "true", "yes", "on"}
-
-ACKNOWLEDGMENT_PHRASES = [
-    "Got it",
-    "Okay",
-    "On it",
-    "Sure",
-    "Right away",
-    "Coming right up",
-    "Let me check",
-    "One moment",
-    "Give me a second",
-    "Let me think",
-    "Hold on",
-    "Beep boop beep",
-]
+# Counted from the transcript being ready, not from end of speech: STT alone
+# takes longer than this, so the latter would fire on every turn. Tune by ear.
+ACK_DELAY_SECONDS = float(os.environ.get("CONSCIOUS_ACK_DELAY_SECONDS", "0.6"))
+# Pre-rendered at startup in the Piper voice, so playing one costs no synthesis.
+ACKNOWLEDGMENT_PHRASES = ["Mhm.", "Hmm, let me think.", "One moment.", "Let me see."]
+_ack_phrases = itertools.cycle(ACKNOWLEDGMENT_PHRASES)
 
 os.environ.setdefault("AGENT_MANIFEST_FILE", str(REPO_ROOT / "registries" / "manifest.hocon"))
 os.environ.setdefault("AGENT_TOOL_PATH", str(REPO_ROOT / "coded_tools"))
@@ -149,8 +141,12 @@ _speech_epoch = 0
 _speech_active = False
 _active_speech_text = ""
 _active_speech_ended_at = 0.0
-# The voice turn whose reply is on the speaker, for its first-audio timestamp.
+# The voice turn whose reply is on the speaker, for its first-audio timestamp,
+# and the turn_timing step that audio marks ("audio", or "ack").
 _active_turn_id = None
+_active_turn_step = "audio"
+# When speech was last queued, so an acknowledgement never follows an answer.
+_last_speech_enqueued_at = 0.0
 _duck_release_timer = None
 
 # How long after playback ends a transcript may still be the robot's own voice.
@@ -336,6 +332,8 @@ def speak_text_streaming(
 
     try:
         logging.info("Speaking TTS utterance (%d chars)", len(clean_text))
+        if tts_say_cached is not None and tts_say_cached(clean_text):
+            return
         tts_say(clean_text, chunked=False)
         if on_speech_complete:
             on_speech_complete(clean_text)
@@ -522,13 +520,14 @@ def cancel_speech(reason: str = "barge-in") -> None:
     )
 
 
-def _begin_utterance(text: str, turn_id=None) -> None:
+def _begin_utterance(text: str, turn_id=None, step: str = "audio") -> None:
     """Record what is on the speaker so the self-echo filter can match it."""
-    global _speech_active, _active_speech_text, _active_turn_id  # pylint: disable=global-statement
+    global _speech_active, _active_speech_text, _active_turn_id, _active_turn_step  # pylint: disable=global-statement
     with _speech_state_lock:
         _speech_active = True
         _active_speech_text = text
         _active_turn_id = turn_id
+        _active_turn_step = step
 
 
 def _end_utterance() -> None:
@@ -556,12 +555,14 @@ def speech_worker():
                 ui_text = str(job.get("ui_text", text))
                 job_epoch = int(job.get("epoch", 0))
                 job_turn_id = job.get("turn_id")
+                is_ack = bool(job.get("ack", False))
             else:
                 text = str(job)
                 emit_to_ui = False
                 ui_text = text
                 job_epoch = 0
                 job_turn_id = None
+                is_ack = False
 
             with _speech_state_lock:
                 current_epoch = _speech_epoch
@@ -575,7 +576,7 @@ def speech_worker():
 
             if text:
                 speech_active = True
-                _begin_utterance(text, job_turn_id)
+                _begin_utterance(text, job_turn_id, "ack" if is_ack else "audio")
                 emit_speech_state(True)
 
             logging.info("Speech worker: starting TTS job (%d chars)", len(text) if text else 0)
@@ -587,7 +588,8 @@ def speech_worker():
                 if not still_current:
                     logging.info("Speech worker: utterance cancelled before playback")
                     continue
-                turn_timing.mark(job_turn_id, "speak_start")
+                if not is_ack:
+                    turn_timing.mark(job_turn_id, "speak_start")
                 speak_text(text)
                 logging.info("Speech worker: TTS completed")
                 if emit_to_ui:
@@ -621,14 +623,17 @@ def enqueue_speech(
     emit_to_ui: bool = False,
     ui_text: str | None = None,
     turn_id: str | None = None,
+    ack: bool = False,
 ) -> None:
     """Queue speech playback, optionally syncing the UI to speech start."""
+    global _last_speech_enqueued_at  # pylint: disable=global-statement
     if shutdown_event.is_set():
         logging.debug("Skipping speech enqueue during shutdown")
         return
 
     with _speech_state_lock:
         epoch = _speech_epoch
+        _last_speech_enqueued_at = time.monotonic()
 
     speech_queue.put(
         {
@@ -637,22 +642,50 @@ def enqueue_speech(
             "ui_text": text if ui_text is None else ui_text,
             "epoch": epoch,
             "turn_id": turn_id,
+            "ack": ack,
         }
     )
+
+
+def _acknowledge_if_slow(turn_id: str | None, epoch: int, since: float) -> None:
+    """Play one acknowledgement unless the turn's answer (or anything) got there first."""
+    with _speech_state_lock:
+        if (
+            epoch != _speech_epoch
+            or _speech_active
+            or _last_speech_enqueued_at >= since
+        ):
+            return
+        # Enqueued under the lock, so an answer arriving now queues behind it.
+        enqueue_speech(next(_ack_phrases), turn_id=turn_id, ack=True)
+
+
+def schedule_acknowledgement(turn_id: str | None) -> None:
+    """Arm the acknowledgement for a voice turn whose transcript just arrived."""
+    if not ACKNOWLEDGE_USER_INPUT:
+        return
+    with _speech_state_lock:
+        epoch = _speech_epoch
+    timer = threading.Timer(
+        ACK_DELAY_SECONDS, _acknowledge_if_slow, args=(turn_id, epoch, time.monotonic())
+    )
+    timer.daemon = True
+    timer.start()
 
 
 # Load the local recogniser now if it is the configured one, so the first press
 # of the mic button is not waiting on a model load.
 local_stt.warm_in_background()
 if warm_piper_in_background is not None:
-    warm_piper_in_background()
+    warm_piper_in_background(ACKNOWLEDGMENT_PHRASES if ACKNOWLEDGE_USER_INPUT else ())
 
 
 def _on_audio_started(**details: object) -> None:
     """The moment the robot is audible, for time-to-first-word measurements (#5, #13)."""
     with _speech_state_lock:
         turn_id = _active_turn_id
-    turn_timing.mark(turn_id, "audio", **details)
+        step = _active_turn_step
+    turn_timing.mark(turn_id, step, **details)
     socketio.emit("speech_audio_started", {"turn_id": turn_id}, namespace="/chat")
 
 
@@ -880,8 +913,8 @@ def handle_user_input(json, *_):
     # was saying and whatever it was still queued to say.
     cancel_speech(reason="user input")
     socketio.emit("processing_started", {"interactive": True}, namespace="/chat")
-    if ACKNOWLEDGE_USER_INPUT:
-        enqueue_speech(random.choice(ACKNOWLEDGMENT_PHRASES), emit_to_ui=True)
+    if turn_id is not None:  # a voice turn, not typed text
+        schedule_acknowledgement(turn_id)
 
     def submit() -> None:
         accepted = dispatch_agent_event(user_input, source="user", turn_id=turn_id)
@@ -930,9 +963,10 @@ def handle_barge_in(json=None, *_):
 def handle_ambient_transcript(json, *_):
     """Queue an always-listening transcript without treating it as direct input.
 
-    Ambient mode deliberately has no acknowledgement, processing indicator, or
-    automatic speech.  The native agent receives every usable transcript and
-    decides from its event instructions whether the robot was being addressed.
+    Ambient mode has no processing indicator or automatic speech.  The native
+    agent receives every usable transcript and decides from its event
+    instructions whether the robot was being addressed. Only a transcript that
+    names the robot is clearly meant for it and gets an acknowledgement.
 
     This is also where a ducked barge-in is resolved: a transcript that matches
     what the robot is saying restores the volume, and anything else confirms a
@@ -967,6 +1001,8 @@ def handle_ambient_transcript(json, *_):
     )
     # Hosted ambient sends no age and is out of scope for turn timing (#13).
     turn_id = turn_timing.start("ambient", captured_ago) if "captured_ms_ago" in (json or {}) else None
+    if robot_name().lower() in transcript.lower():
+        schedule_acknowledgement(turn_id)
     queue_agent_event(transcript, source="ambient", turn_id=turn_id)
 
 

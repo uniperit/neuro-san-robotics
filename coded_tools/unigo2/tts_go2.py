@@ -1335,14 +1335,20 @@ def _piper_voice() -> Any:
         return _PIPER_VOICE
 
 
-def warm_piper_in_background() -> None:
-    """Load the Piper voice off the request path, so the first reply does not pay for it."""
+def warm_piper_in_background(phrases: List[str] | tuple = ()) -> None:
+    """Load the Piper voice off the request path, so the first reply does not pay for it.
+
+    ``phrases`` are also pre-rendered into the audio cache, unless replies are
+    spoken by OpenAI, whose voice a cached Piper phrase would not match.
+    """
     if TTS_ENGINE not in ("piper", "auto") or not _is_piper_available():
         return
 
     def load():
         try:
             _piper_voice()
+            if phrases and not _should_use_openai():
+                prewarm_audio_cache(list(phrases))
         except Exception:
             logging.exception("Could not warm the Piper voice")
 
