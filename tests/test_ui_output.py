@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import patch
 
 from coded_tools.unigo2.ui_output import UiOutputTool
+from coded_tools.unigo2.ui_output import speakable
 
 
 class UiOutputToolTests(unittest.IsolatedAsyncioTestCase):
@@ -82,6 +83,20 @@ class UiOutputToolTests(unittest.IsolatedAsyncioTestCase):
             )
         nav.assert_not_called()
         self.assertIn("Refused", result)
+
+
+class SpeakableTests(unittest.TestCase):
+    def test_strips_what_tts_would_read_literally(self):
+        cases = {
+            "*wags tail* Hi there! 🐶": "Hi there!",
+            "That's **really** pawsome *perks up ears*.": "That's really pawsome.",
+            "- first\n- second\n1. third": "first second third",
+            "See [the docs](https://x.y) for `nav` #help": "See the docs for nav help",
+            "Let me sniff around... ten o'clock, 3.5 m.": "Let me sniff around... ten o'clock, 3.5 m.",
+        }
+        for raw, spoken in cases.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(speakable(raw), spoken)
 
 
 if __name__ == "__main__":

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import Any
 from typing import Dict
 
@@ -11,6 +12,24 @@ from neuro_san.interfaces.coded_tool import CodedTool
 from coded_tools.unigo2.agent_events import SILENT_SOURCES
 from coded_tools.unigo2.agent_events import event_source
 from coded_tools.unigo2.agent_events import publish_ui_output
+
+_STAGE_DIRECTION = re.compile(r"\*[^*\n]+\*(?!\*)")  # *wags tail*, not **bold**
+_MARKDOWN_LINK = re.compile(r"\[([^\]]+)\]\([^)]*\)")
+_LIST_MARKER = re.compile(r"^\s*(?:[-*\u2022]|\d+[.)])\s+", re.MULTILINE)
+_MARKUP = re.compile(r"[*_#`~>|]+")
+# Emoji, pictographs, dingbats, flags, variation selectors and joiners.
+_EMOJI = re.compile("[\U0001F000-\U0001FAFF\u2600-\u27BF\uFE0F\u200D]")
+
+
+def speakable(text: str) -> str:
+    """Drop what TTS would read out literally: stage directions, markdown, emojis."""
+    text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)  # bold keeps its words
+    text = _STAGE_DIRECTION.sub(" ", text)
+    text = _MARKDOWN_LINK.sub(r"\1", text)
+    text = _LIST_MARKER.sub("", text)
+    text = _EMOJI.sub("", _MARKUP.sub("", text))
+    text = re.sub(r"\s+([,.!?])", r"\1", text)
+    return " ".join(text.split())
 
 
 class UiOutputTool(CodedTool):
@@ -26,6 +45,7 @@ class UiOutputTool(CodedTool):
             or not isinstance(heard, str)
         ):
             return "thought, say, and heard must be strings. End this event turn now."
+        say = speakable(say)
         if event_source(sly_data) in SILENT_SOURCES:
             say = ""
         if not thought.strip() and not say.strip():

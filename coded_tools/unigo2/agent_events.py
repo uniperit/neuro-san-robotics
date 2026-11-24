@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import ssl
 import threading
 import time
@@ -43,6 +44,16 @@ _PENDING_BY_SOURCE: dict[str, tuple[str, str | None]] = {}
 _speech_epoch_source: Callable[[], int] | None = None
 
 
+# The puns the persona prompt offers (registries/conscious_agent.hocon); keep in sync.
+# Matched at a word start, so "pawsitive" also catches "pawsitively".
+PUNS = (
+    "pawfect", "pawsome", "pawsitive", "impawsible", "fur real", "furget", "pupdate",
+    "paws for", "howl are you", "ruff", "all ears", "no bones about it",
+    "bark to the drawing board", "the leash i can do",
+)
+_PUN_PATTERNS = [(pun, re.compile(r"\b" + re.escape(pun), re.IGNORECASE)) for pun in PUNS]
+
+
 class TurnContext:
     """Recent conversation and camera labels, so each stateless event turn can see them.
 
@@ -58,6 +69,8 @@ class TurnContext:
         self._entries: deque[tuple[str, str]] = deque(maxlen=self.MAX_ENTRIES)
         self._last_at = 0.0
         self._observation: tuple[list[str], float] | None = None
+        # Puns said this conversation; outlives the 10-line window so none repeats.
+        self._puns: list[str] = []
 
     def remember_observation(self, labels: Any) -> None:
         """Keep the newest camera labels; anything but a list counts as none."""
@@ -84,6 +97,11 @@ class TurnContext:
         with self._lock:
             self._expire()
             self._entries.append((speaker, text))
+            if speaker == "you":
+                self._puns += [
+                    pun for pun, pattern in _PUN_PATTERNS
+                    if pattern.search(text) and pun not in self._puns
+                ]
             self._last_at = time.monotonic()
 
     def conversation_block(self) -> str:
@@ -93,11 +111,16 @@ class TurnContext:
             if not self._entries:
                 return ""
             lines = [f"  {speaker}: {text}" for speaker, text in self._entries]
-        return "system: Recent conversation (oldest first, authoritative):\n" + "\n".join(lines)
+            puns = list(self._puns)
+        block = "system: Recent conversation (oldest first, authoritative):\n" + "\n".join(lines)
+        if puns:
+            block += "\nsystem: Recently used puns: " + ", ".join(puns)
+        return block
 
     def _expire(self) -> None:
         if time.monotonic() - self._last_at > self.IDLE_EXPIRY_SECONDS:
             self._entries.clear()
+            self._puns.clear()
 
 
 # shortcut: in-memory and only the Flask process records into it, so a restart

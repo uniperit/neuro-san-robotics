@@ -37,6 +37,27 @@ class TurnContextTest(unittest.TestCase):
             "  you: Hallo Alex!",
         )
 
+    def test_used_puns_outlive_the_ten_line_window(self):
+        agent_events.remember_conversation("you", "That's pawsitively great.")
+        for number in range(12):
+            agent_events.remember_conversation("you", f"Fur real, line {number}")
+
+        agent_events.dispatch_agent_event("und?", source="user")
+
+        self.assertTrue(
+            self.sent_text().endswith("system: Recently used puns: pawsitive, fur real")
+        )
+
+    def test_puns_are_forgotten_with_the_conversation(self):
+        agent_events.remember_conversation("you", "Pawfect!")
+        agent_events.remember_conversation("user", "Ich bin's, der pawfect sagt")
+        self.now += 5 * 60 + 1
+        agent_events.remember_conversation("user", "pawfect")
+
+        agent_events.dispatch_agent_event("und?", source="user")
+
+        self.assertNotIn("Recently used puns", self.sent_text())
+
     def test_conversation_is_forgotten_after_five_quiet_minutes(self):
         agent_events.remember_conversation("you", "Hallo Alex!")
         self.now += 5 * 60 + 1
