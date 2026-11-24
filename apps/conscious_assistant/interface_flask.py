@@ -95,7 +95,8 @@ ACKNOWLEDGE_USER_INPUT = os.environ.get(
 # takes longer than this, so the latter would fire on every turn. Tune by ear.
 ACK_DELAY_SECONDS = float(os.environ.get("CONSCIOUS_ACK_DELAY_SECONDS", "0.6"))
 # Pre-rendered at startup in the Piper voice, so playing one costs no synthesis.
-ACKNOWLEDGMENT_PHRASES = ["Mhm.", "Hmm, let me think.", "One moment.", "Let me see."]
+# Spelled so Piper hums them: it reads "Mhm" and "Hm" letter by letter (M-H-M).
+ACKNOWLEDGMENT_PHRASES = ["Hmmm...", "Hmmm, let me think.", "One moment.", "Let me see."]
 _ack_phrases = itertools.cycle(ACKNOWLEDGMENT_PHRASES)
 
 os.environ.setdefault("AGENT_MANIFEST_FILE", str(REPO_ROOT / "registries" / "manifest.hocon"))
